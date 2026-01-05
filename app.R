@@ -1,5 +1,6 @@
 # Momentum Predictor Shiny App
 # Downloads Bloomberg data, calculates momentum, and runs predictive regressions
+# Supports multiple forecast horizons, Newey-West standard errors, and robust regression
 
 library(shiny)
 library(shinycssloaders)
@@ -53,6 +54,32 @@ ui <- fluidPage(
         max = Sys.Date()
       ),
 
+      hr(),
+
+      h4("Regression Settings"),
+
+      selectInput(
+        "horizon",
+        "Forecast Horizon:",
+        choices = c(
+          "1-month" = 1,
+          "3-month" = 3,
+          "12-month" = 12,
+          "36-month" = 36
+        ),
+        selected = 1
+      ),
+
+      checkboxInput(
+        "use_robust",
+        "Use Robust Regression (rlm)",
+        value = FALSE
+      ),
+
+      helpText("Standard errors use Newey-West HAC estimator to account for autocorrelation in overlapping returns."),
+
+      hr(),
+
       actionButton(
         "fetch_btn",
         "Fetch Data & Analyze",
@@ -67,7 +94,7 @@ ui <- fluidPage(
       tags$ul(
         tags$li("Monthly momentum (1-24 months)"),
         tags$li("EWMA momentum (alpha: 0.01-0.50)"),
-        tags$li("Predictive regressions for 1-month forward returns")
+        tags$li("Predictive regressions for forward returns")
       ),
 
       hr(),
@@ -89,8 +116,8 @@ ui <- fluidPage(
         tabPanel(
           "Monthly Momentum",
           br(),
-          h4("Monthly Momentum Regression Results"),
-          p("Predicting 1-month forward returns using past momentum (1-24 months)"),
+          h4(textOutput("monthly_title")),
+          p(textOutput("monthly_subtitle")),
           withSpinner(DTOutput("monthly_table")),
           br(),
           h4("Scatter Plots (Significant Predictors)"),
@@ -101,8 +128,8 @@ ui <- fluidPage(
         tabPanel(
           "EWMA Momentum",
           br(),
-          h4("EWMA Momentum Regression Results"),
-          p("Predicting 1-month forward returns using EWMA of daily returns"),
+          h4(textOutput("ewma_title")),
+          p(textOutput("ewma_subtitle")),
           withSpinner(DTOutput("ewma_table")),
           br(),
           h4("Scatter Plots (Significant Predictors)"),
@@ -114,7 +141,7 @@ ui <- fluidPage(
           "Significant Predictors",
           br(),
           h4("Summary of Significant Predictors (p < 0.05)"),
-          p("All momentum measures that significantly predict 1-month forward returns"),
+          p(textOutput("sig_subtitle")),
           withSpinner(DTOutput("significant_table")),
           br(),
           h4("Significance Overview"),
@@ -138,12 +165,43 @@ server <- function(input, output, session) {
     ewma_results = NULL,
     is_spread = FALSE,
     analysis_label = "",
+    current_horizon = 1,
+    use_robust = FALSE,
     status = "Ready. Enter a ticker and click 'Fetch Data & Analyze'."
   )
 
   # Status output
   output$status_text <- renderText({
     rv$status
+  })
+
+  # Dynamic titles
+  output$monthly_title <- renderText({
+    horizon <- rv$current_horizon
+    robust_label <- if (rv$use_robust) " (Robust)" else ""
+    paste0("Monthly Momentum Regression Results", robust_label)
+  })
+
+  output$monthly_subtitle <- renderText({
+    horizon <- rv$current_horizon
+    paste0("Predicting ", horizon, "-month forward returns using past momentum (1-24 months). ",
+           "Standard errors: Newey-West HAC (lag = ", max(0, horizon - 1), ")")
+  })
+
+  output$ewma_title <- renderText({
+    robust_label <- if (rv$use_robust) " (Robust)" else ""
+    paste0("EWMA Momentum Regression Results", robust_label)
+  })
+
+  output$ewma_subtitle <- renderText({
+    horizon <- rv$current_horizon
+    paste0("Predicting ", horizon, "-month forward returns using EWMA of daily returns. ",
+           "Standard errors: Newey-West HAC (lag = ", max(0, horizon - 1), ")")
+  })
+
+  output$sig_subtitle <- renderText({
+    horizon <- rv$current_horizon
+    paste0("All momentum measures that significantly predict ", horizon, "-month forward returns")
   })
 
   # Main analysis triggered by button click
@@ -157,6 +215,11 @@ server <- function(input, output, session) {
     ticker2 <- trimws(input$ticker2)
     start_date <- input$date_range[1]
     end_date <- input$date_range[2]
+    horizon <- as.integer(input$horizon)
+    use_robust <- input$use_robust
+
+    rv$current_horizon <- horizon
+    rv$use_robust <- use_robust
 
     if (nchar(ticker) == 0) {
       rv$status <- "Error: Please enter a valid ticker."
@@ -214,20 +277,32 @@ server <- function(input, output, session) {
       momentum_data <- prepare_momentum_data(analysis_data)
       rv$monthly_mom <- momentum_data$monthly_mom
       rv$ewma_mom <- momentum_data$ewma_mom
-      rv$status <- "Momentum calculated. Running regressions..."
 
-      # Step 4: Run regressions
-      rv$monthly_results <- run_monthly_momentum_regressions(rv$monthly_mom)
-      rv$ewma_results <- run_ewma_momentum_regressions(rv$ewma_mom)
+      robust_label <- if (use_robust) " (robust)" else ""
+      rv$status <- paste0("Momentum calculated. Running ", horizon, "-month regressions", robust_label, "...")
+
+      # Step 4: Run regressions with selected horizon and robust option
+      rv$monthly_results <- run_monthly_momentum_regressions(
+        rv$monthly_mom,
+        horizon = horizon,
+        use_robust = use_robust
+      )
+      rv$ewma_results <- run_ewma_momentum_regressions(
+        rv$ewma_mom,
+        horizon = horizon,
+        use_robust = use_robust
+      )
 
       # Count significant predictors
       n_sig_monthly <- sum(rv$monthly_results$significant, na.rm = TRUE)
       n_sig_ewma <- sum(rv$ewma_results$significant, na.rm = TRUE)
 
       analysis_type <- if (use_spread) "Spread analysis" else "Analysis"
+      regression_type <- if (use_robust) "Robust regression" else "OLS with Newey-West SE"
       rv$status <- paste0(
         analysis_type, " complete!\n",
         "Analyzing: ", rv$analysis_label, "\n",
+        "Horizon: ", horizon, "-month | ", regression_type, "\n",
         "Monthly momentum: ", n_sig_monthly, "/24 significant\n",
         "EWMA momentum: ", n_sig_ewma, "/50 significant"
       )
@@ -317,6 +392,7 @@ server <- function(input, output, session) {
   output$significance_summary <- renderText({
     req(rv$monthly_results, rv$ewma_results)
 
+    horizon <- rv$current_horizon
     n_monthly_sig <- sum(rv$monthly_results$significant, na.rm = TRUE)
     n_ewma_sig <- sum(rv$ewma_results$significant, na.rm = TRUE)
 
@@ -332,10 +408,15 @@ server <- function(input, output, session) {
       arrange(p_value) %>%
       slice(1)
 
+    regression_type <- if (rv$use_robust) "Robust (rlm)" else "OLS"
+    nw_lag <- max(0, horizon - 1)
+
     summary_text <- paste0(
       "SUMMARY\n",
       "=======\n",
-      "Analyzing: ", rv$analysis_label, "\n\n",
+      "Analyzing: ", rv$analysis_label, "\n",
+      "Forecast horizon: ", horizon, " month(s)\n",
+      "Regression: ", regression_type, " | Newey-West lag: ", nw_lag, "\n\n",
       "Monthly Momentum:\n",
       "  - Significant predictors: ", n_monthly_sig, " out of 24\n"
     )
@@ -370,14 +451,14 @@ server <- function(input, output, session) {
       summary_text <- paste0(
         summary_text,
         "\nCONCLUSION: No momentum measure significantly predicts\n",
-        "1-month forward returns for this ticker at the 5% level."
+        horizon, "-month forward returns at the 5% level."
       )
     } else {
       summary_text <- paste0(
         summary_text,
         "\nCONCLUSION: ", n_monthly_sig + n_ewma_sig,
         " momentum measures significantly predict\n",
-        "1-month forward returns at the 5% level."
+        horizon, "-month forward returns at the 5% level."
       )
     }
 
@@ -387,6 +468,8 @@ server <- function(input, output, session) {
   # Monthly momentum scatter plots
   output$monthly_plots <- renderPlot({
     req(rv$monthly_results, rv$monthly_mom)
+
+    horizon <- rv$current_horizon
 
     # Get significant predictors
     sig_predictors <- rv$monthly_results %>%
@@ -412,6 +495,7 @@ server <- function(input, output, session) {
         rv$monthly_mom,
         row$predictor,
         row$predictor_label,
+        horizon = horizon,
         significant = TRUE
       )
     })
@@ -427,6 +511,8 @@ server <- function(input, output, session) {
   # EWMA momentum scatter plots
   output$ewma_plots <- renderPlot({
     req(rv$ewma_results, rv$ewma_mom)
+
+    horizon <- rv$current_horizon
 
     # Get significant predictors
     sig_predictors <- rv$ewma_results %>%
@@ -451,6 +537,7 @@ server <- function(input, output, session) {
         rv$ewma_mom,
         row$predictor,
         row$predictor_label,
+        horizon = horizon,
         significant = TRUE
       )
     })

@@ -119,14 +119,24 @@ calc_ewma_momentum <- function(daily_data, alphas = seq(0.01, 0.50, by = 0.01)) 
   return(monthly_ewma)
 }
 
-#' Calculate forward 1-month return
+#' Calculate forward returns for multiple horizons
 #'
-#' @param monthly_data Data frame with columns: date, monthly_return
-#' @return Data frame with added column: fwd_return_1m
-calc_forward_returns <- function(monthly_data) {
-  monthly_data %>%
-    arrange(date) %>%
-    mutate(fwd_return_1m = lead(monthly_return, 1))
+#' @param monthly_data Data frame with columns: date, tri, monthly_return
+#' @param horizons Vector of forward return horizons in months (default c(1, 3, 12, 36))
+#' @return Data frame with added columns: fwd_return_1m, fwd_return_3m, fwd_return_12m, fwd_return_36m
+calc_forward_returns <- function(monthly_data, horizons = c(1, 3, 12, 36)) {
+  result <- monthly_data %>%
+    arrange(date)
+
+  # Calculate forward returns for each horizon
+ # Forward return = TRI(t+h) / TRI(t) - 1
+  for (h in horizons) {
+    col_name <- paste0("fwd_return_", h, "m")
+    result <- result %>%
+      mutate(!!col_name := lead(tri, h) / tri - 1)
+  }
+
+  return(result)
 }
 
 #' Calculate spread returns from two TRI series
@@ -202,9 +212,10 @@ prepare_momentum_data <- function(daily_data) {
   ewma_monthly <- calc_ewma_momentum(daily_with_returns)
 
   # Merge EWMA with monthly data (by date)
-  # First, add forward returns to monthly_mom if not already there
+  # Get all forward return columns
+  fwd_cols <- grep("^fwd_return_", colnames(monthly_mom), value = TRUE)
   monthly_base <- monthly_mom %>%
-    select(date, fwd_return_1m)
+    select(date, all_of(fwd_cols))
 
   ewma_mom <- ewma_monthly %>%
     left_join(monthly_base, by = "date")
