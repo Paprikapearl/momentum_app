@@ -129,6 +129,54 @@ calc_forward_returns <- function(monthly_data) {
     mutate(fwd_return_1m = lead(monthly_return, 1))
 }
 
+#' Calculate spread returns from two TRI series
+#'
+#' @param data1 Data frame with columns: date, tri (ticker 1)
+#' @param data2 Data frame with columns: date, tri (ticker 2)
+#' @return Data frame with columns: date, tri (synthetic spread TRI), daily_return (spread return)
+calc_spread_data <- function(data1, data2) {
+
+  # Calculate daily returns for each ticker
+  data1 <- data1 %>%
+    arrange(date) %>%
+    mutate(return1 = tri / lag(tri) - 1)
+
+  data2 <- data2 %>%
+    arrange(date) %>%
+    mutate(return2 = tri / lag(tri) - 1)
+
+  # Merge on date (inner join to keep only common dates)
+  merged <- inner_join(
+    data1 %>% select(date, tri1 = tri, return1),
+    data2 %>% select(date, tri2 = tri, return2),
+    by = "date"
+  )
+
+  # Calculate spread return (ticker1 - ticker2)
+  merged <- merged %>%
+    arrange(date) %>%
+    mutate(
+      daily_return = return1 - return2
+    )
+
+  # Create synthetic TRI from spread returns (for momentum calculations)
+  # Start at 100 and compound spread returns
+  merged$tri <- NA
+  merged$tri[1] <- 100
+  for (i in 2:nrow(merged)) {
+    if (!is.na(merged$daily_return[i])) {
+      merged$tri[i] <- merged$tri[i-1] * (1 + merged$daily_return[i])
+    } else {
+      merged$tri[i] <- merged$tri[i-1]
+    }
+  }
+
+  result <- merged %>%
+    select(date, tri, daily_return)
+
+  return(result)
+}
+
 #' Prepare complete momentum dataset for regression analysis
 #'
 #' @param daily_data Data frame with columns: date, tri (daily)

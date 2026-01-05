@@ -30,10 +30,19 @@ ui <- fluidPage(
 
       textInput(
         "ticker",
-        "Bloomberg Ticker:",
+        "Bloomberg Ticker 1:",
         value = "SPY US Equity",
         placeholder = "e.g., SPY US Equity"
       ),
+
+      textInput(
+        "ticker2",
+        "Bloomberg Ticker 2 (optional):",
+        value = "",
+        placeholder = "e.g., AGG US Equity"
+      ),
+
+      helpText("If Ticker 2 is provided, analysis uses the spread (Ticker1 - Ticker2)."),
 
       dateRangeInput(
         "date_range",
@@ -122,10 +131,13 @@ server <- function(input, output, session) {
   # Reactive values to store results
   rv <- reactiveValues(
     data = NULL,
+    data2 = NULL,
     monthly_mom = NULL,
     ewma_mom = NULL,
     monthly_results = NULL,
     ewma_results = NULL,
+    is_spread = FALSE,
+    analysis_label = "",
     status = "Ready. Enter a ticker and click 'Fetch Data & Analyze'."
   )
 
@@ -142,6 +154,7 @@ server <- function(input, output, session) {
     req(input$date_range)
 
     ticker <- trimws(input$ticker)
+    ticker2 <- trimws(input$ticker2)
     start_date <- input$date_range[1]
     end_date <- input$date_range[2]
 
@@ -153,6 +166,16 @@ server <- function(input, output, session) {
     if (start_date >= end_date) {
       rv$status <- "Error: Start date must be before end date."
       return()
+    }
+
+    # Check if we're doing spread analysis
+    use_spread <- nchar(ticker2) > 0
+    rv$is_spread <- use_spread
+
+    if (use_spread) {
+      rv$analysis_label <- paste0("Spread (", ticker, " - ", ticker2, ")")
+    } else {
+      rv$analysis_label <- ticker
     }
 
     # Start analysis
@@ -168,13 +191,27 @@ server <- function(input, output, session) {
       }
       rv$status <- "Connected. Fetching data..."
 
-      # Step 2: Fetch data
-      raw_data <- fetch_bloomberg_data(ticker, start_date, end_date)
-      rv$data <- raw_data
-      rv$status <- paste("Data fetched:", nrow(raw_data), "daily observations. Calculating momentum...")
+      # Step 2: Fetch data for ticker 1
+      raw_data1 <- fetch_bloomberg_data(ticker, start_date, end_date)
+      rv$data <- raw_data1
+
+      # Step 2b: If spread mode, fetch ticker 2 and calculate spread
+      if (use_spread) {
+        rv$status <- paste("Fetched", ticker, "(", nrow(raw_data1), "obs). Fetching", ticker2, "...")
+        raw_data2 <- fetch_bloomberg_data(ticker2, start_date, end_date)
+        rv$data2 <- raw_data2
+        rv$status <- paste("Fetched both tickers. Calculating spread returns...")
+
+        # Calculate spread data
+        analysis_data <- calc_spread_data(raw_data1, raw_data2)
+        rv$status <- paste("Spread calculated:", nrow(analysis_data), "common dates. Calculating momentum...")
+      } else {
+        analysis_data <- raw_data1
+        rv$status <- paste("Data fetched:", nrow(analysis_data), "daily observations. Calculating momentum...")
+      }
 
       # Step 3: Calculate momentum
-      momentum_data <- prepare_momentum_data(raw_data)
+      momentum_data <- prepare_momentum_data(analysis_data)
       rv$monthly_mom <- momentum_data$monthly_mom
       rv$ewma_mom <- momentum_data$ewma_mom
       rv$status <- "Momentum calculated. Running regressions..."
@@ -187,8 +224,10 @@ server <- function(input, output, session) {
       n_sig_monthly <- sum(rv$monthly_results$significant, na.rm = TRUE)
       n_sig_ewma <- sum(rv$ewma_results$significant, na.rm = TRUE)
 
+      analysis_type <- if (use_spread) "Spread analysis" else "Analysis"
       rv$status <- paste0(
-        "Analysis complete!\n",
+        analysis_type, " complete!\n",
+        "Analyzing: ", rv$analysis_label, "\n",
         "Monthly momentum: ", n_sig_monthly, "/24 significant\n",
         "EWMA momentum: ", n_sig_ewma, "/50 significant"
       )
@@ -295,7 +334,8 @@ server <- function(input, output, session) {
 
     summary_text <- paste0(
       "SUMMARY\n",
-      "=======\n\n",
+      "=======\n",
+      "Analyzing: ", rv$analysis_label, "\n\n",
       "Monthly Momentum:\n",
       "  - Significant predictors: ", n_monthly_sig, " out of 24\n"
     )
