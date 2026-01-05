@@ -30,7 +30,7 @@ aggregate_to_monthly <- function(data) {
       tri = last(tri),   # End of month TRI
       .groups = "drop"
     ) %>%
-    select(date, tri) %>%
+    dplyr::select(date, tri) %>%
     arrange(date)
 }
 
@@ -113,7 +113,7 @@ calc_ewma_momentum <- function(daily_data, alphas = seq(0.01, 0.50, by = 0.01)) 
       across(all_of(ewma_cols), ~ last(.x)),
       .groups = "drop"
     ) %>%
-    select(-year_month) %>%
+    dplyr::select(-year_month) %>%
     arrange(date)
 
   return(monthly_ewma)
@@ -156,9 +156,10 @@ calc_spread_data <- function(data1, data2) {
     mutate(return2 = tri / lag(tri) - 1)
 
   # Merge on date (inner join to keep only common dates)
+  # Use dplyr::select explicitly to avoid conflict with MASS::select
   merged <- inner_join(
-    data1 %>% select(date, tri1 = tri, return1),
-    data2 %>% select(date, tri2 = tri, return2),
+    data1 %>% dplyr::select(date, tri1 = tri, return1),
+    data2 %>% dplyr::select(date, tri2 = tri, return2),
     by = "date"
   )
 
@@ -182,7 +183,7 @@ calc_spread_data <- function(data1, data2) {
   }
 
   result <- merged %>%
-    select(date, tri, daily_return)
+    dplyr::select(date, tri, daily_return)
 
   return(result)
 }
@@ -215,7 +216,7 @@ prepare_momentum_data <- function(daily_data) {
   # Get all forward return columns
   fwd_cols <- grep("^fwd_return_", colnames(monthly_mom), value = TRUE)
   monthly_base <- monthly_mom %>%
-    select(date, all_of(fwd_cols))
+    dplyr::select(date, all_of(fwd_cols))
 
   ewma_mom <- ewma_monthly %>%
     left_join(monthly_base, by = "date")

@@ -21,7 +21,7 @@ run_single_regression <- function(data, y_var, x_var, use_robust = FALSE, horizo
 
   # Filter complete cases for these two variables
   reg_data <- data %>%
-    select(all_of(c(y_var, x_var))) %>%
+    dplyr::select(all_of(c(y_var, x_var))) %>%
     filter(complete.cases(.))
 
   if (nrow(reg_data) < 10) {
@@ -226,7 +226,7 @@ format_regression_results <- function(results) {
       r_squared = round(r_squared * 100, 2),  # Convert to percentage
       adj_r_squared = round(adj_r_squared * 100, 2)
     ) %>%
-    select(
+    dplyr::select(
       Predictor = predictor_label,
       Coefficient = coefficient,
       `Std. Error (NW)` = std_error,
@@ -252,7 +252,7 @@ create_scatter_plot <- function(data, x_var, x_label, horizon = 1, significant =
   y_var <- paste0("fwd_return_", horizon, "m")
 
   plot_data <- data %>%
-    select(fwd_return = all_of(y_var), momentum = all_of(x_var)) %>%
+    dplyr::select(fwd_return = all_of(y_var), momentum = all_of(x_var)) %>%
     filter(complete.cases(.))
 
   # Color based on significance
@@ -300,7 +300,7 @@ get_significant_summary <- function(monthly_results, ewma_results) {
       horizon_label = paste0(horizon, "m")
     ) %>%
     arrange(horizon, desc(abs(t_statistic))) %>%
-    select(
+    dplyr::select(
       Horizon = horizon_label,
       Type = type,
       Predictor = predictor_label,
