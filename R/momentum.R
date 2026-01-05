@@ -1,0 +1,168 @@
+# Momentum Calculation Functions
+# Calculates monthly momentum (1-24 months) and EWMA momentum from daily returns
+
+library(dplyr)
+library(lubridate)
+library(tidyr)
+
+#' Calculate daily returns from total return index
+#'
+#' @param data Data frame with columns: date, tri
+#' @return Data frame with added column: daily_return
+calc_daily_returns <- function(data) {
+  data <- data %>%
+    arrange(date) %>%
+    mutate(daily_return = tri / lag(tri) - 1)
+
+  return(data)
+}
+
+#' Aggregate daily data to monthly (end of month)
+#'
+#' @param data Data frame with columns: date, tri
+#' @return Data frame with monthly data: date (end of month), tri
+aggregate_to_monthly <- function(data) {
+  data %>%
+    mutate(year_month = floor_date(date, "month")) %>%
+    group_by(year_month) %>%
+    summarise(
+      date = max(date),  # Last trading day of month
+      tri = last(tri),   # End of month TRI
+      .groups = "drop"
+    ) %>%
+    select(date, tri) %>%
+    arrange(date)
+}
+
+#' Calculate monthly returns from monthly TRI data
+#'
+#' @param monthly_data Data frame with columns: date, tri (monthly)
+#' @return Data frame with added column: monthly_return
+calc_monthly_returns <- function(monthly_data) {
+  monthly_data %>%
+    arrange(date) %>%
+    mutate(monthly_return = tri / lag(tri) - 1)
+}
+
+#' Calculate monthly momentum for various lookback periods
+#'
+#' @param monthly_data Data frame with columns: date, tri, monthly_return
+#' @param lookback_months Vector of lookback periods (default 1:24)
+#' @return Data frame with momentum columns: mom_1, mom_2, ..., mom_24
+calc_monthly_momentum <- function(monthly_data, lookback_months = 1:24) {
+
+  result <- monthly_data %>%
+    arrange(date)
+
+  # Calculate momentum for each lookback period
+  # Momentum = cumulative return over lookback period = price(t) / price(t-n) - 1
+  for (n in lookback_months) {
+    col_name <- paste0("mom_", n)
+    result <- result %>%
+      mutate(!!col_name := tri / lag(tri, n) - 1)
+  }
+
+  return(result)
+}
+
+#' Calculate EWMA momentum from daily returns
+#'
+#' @param daily_data Data frame with columns: date, daily_return
+#' @param alphas Vector of alpha values (default seq(0.01, 0.50, by = 0.01))
+#' @return Data frame with EWMA columns aggregated to monthly
+calc_ewma_momentum <- function(daily_data, alphas = seq(0.01, 0.50, by = 0.01)) {
+
+  # Ensure data is sorted
+ daily_data <- daily_data %>%
+    arrange(date) %>%
+    filter(!is.na(daily_return))
+
+  n_obs <- nrow(daily_data)
+
+  # Initialize EWMA matrix
+  ewma_matrix <- matrix(NA, nrow = n_obs, ncol = length(alphas))
+  colnames(ewma_matrix) <- paste0("ewma_", sprintf("%.2f", alphas))
+
+  # Calculate EWMA for each alpha
+  for (j in seq_along(alphas)) {
+    alpha <- alphas[j]
+    ewma <- numeric(n_obs)
+
+    # Initialize first EWMA value with first return
+    ewma[1] <- daily_data$daily_return[1]
+
+    # Recursive EWMA calculation
+    for (i in 2:n_obs) {
+      ewma[i] <- alpha * daily_data$daily_return[i] + (1 - alpha) * ewma[i - 1]
+    }
+
+    ewma_matrix[, j] <- ewma
+  }
+
+  # Combine with original data
+  result <- cbind(daily_data, as.data.frame(ewma_matrix))
+
+  # Aggregate to monthly (take end of month values)
+  ewma_cols <- colnames(ewma_matrix)
+
+  monthly_ewma <- result %>%
+    mutate(year_month = floor_date(date, "month")) %>%
+    group_by(year_month) %>%
+    summarise(
+      date = max(date),
+      across(all_of(ewma_cols), ~ last(.x)),
+      .groups = "drop"
+    ) %>%
+    select(-year_month) %>%
+    arrange(date)
+
+  return(monthly_ewma)
+}
+
+#' Calculate forward 1-month return
+#'
+#' @param monthly_data Data frame with columns: date, monthly_return
+#' @return Data frame with added column: fwd_return_1m
+calc_forward_returns <- function(monthly_data) {
+  monthly_data %>%
+    arrange(date) %>%
+    mutate(fwd_return_1m = lead(monthly_return, 1))
+}
+
+#' Prepare complete momentum dataset for regression analysis
+#'
+#' @param daily_data Data frame with columns: date, tri (daily)
+#' @return List with two data frames: monthly_mom (monthly momentum) and ewma_mom (EWMA momentum)
+prepare_momentum_data <- function(daily_data) {
+
+  # Calculate daily returns
+  daily_with_returns <- calc_daily_returns(daily_data)
+
+  # Aggregate to monthly
+  monthly_data <- aggregate_to_monthly(daily_data)
+
+  # Calculate monthly returns
+  monthly_data <- calc_monthly_returns(monthly_data)
+
+  # Calculate monthly momentum (1-24 months)
+  monthly_mom <- calc_monthly_momentum(monthly_data)
+
+  # Add forward returns
+  monthly_mom <- calc_forward_returns(monthly_mom)
+
+  # Calculate EWMA momentum from daily data
+  ewma_monthly <- calc_ewma_momentum(daily_with_returns)
+
+  # Merge EWMA with monthly data (by date)
+  # First, add forward returns to monthly_mom if not already there
+  monthly_base <- monthly_mom %>%
+    select(date, fwd_return_1m)
+
+  ewma_mom <- ewma_monthly %>%
+    left_join(monthly_base, by = "date")
+
+  return(list(
+    monthly_mom = monthly_mom,
+    ewma_mom = ewma_mom
+  ))
+}
