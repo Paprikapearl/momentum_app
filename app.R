@@ -14,11 +14,14 @@ source("R/bloomberg.R")
 source("R/momentum.R")
 source("R/regression.R")
 
+# All forecast horizons to calculate
+ALL_HORIZONS <- c(1, 3, 12, 36)
+
 # UI Definition
 ui <- fluidPage(
 
   # App title
-  titlePanel("Momentum Predictor Analysis"),
+ titlePanel("Momentum Predictor Analysis"),
 
   # Sidebar layout
   sidebarLayout(
@@ -60,7 +63,7 @@ ui <- fluidPage(
 
       selectInput(
         "horizon",
-        "Forecast Horizon:",
+        "Display Horizon:",
         choices = c(
           "1-month" = 1,
           "3-month" = 3,
@@ -76,7 +79,8 @@ ui <- fluidPage(
         value = FALSE
       ),
 
-      helpText("Standard errors use Newey-West HAC estimator to account for autocorrelation in overlapping returns."),
+      helpText("All horizons (1, 3, 12, 36 months) are calculated on fetch. Use dropdown to switch views."),
+      helpText("Standard errors use Newey-West HAC estimator."),
 
       hr(),
 
@@ -94,7 +98,7 @@ ui <- fluidPage(
       tags$ul(
         tags$li("Monthly momentum (1-24 months)"),
         tags$li("EWMA momentum (alpha: 0.01-0.50)"),
-        tags$li("Predictive regressions for forward returns")
+        tags$li("Regressions for 1, 3, 12, 36-month returns")
       ),
 
       hr(),
@@ -161,14 +165,52 @@ server <- function(input, output, session) {
     data2 = NULL,
     monthly_mom = NULL,
     ewma_mom = NULL,
-    monthly_results = NULL,
-    ewma_results = NULL,
+    # Store results for ALL horizons and BOTH regression types
+    monthly_results_ols = NULL,     # OLS results for all horizons
+    monthly_results_robust = NULL,  # Robust results for all horizons
+    ewma_results_ols = NULL,        # OLS results for all horizons
+    ewma_results_robust = NULL,     # Robust results for all horizons
     is_spread = FALSE,
     analysis_label = "",
-    current_horizon = 1,
-    use_robust = FALSE,
+    data_loaded = FALSE,
     status = "Ready. Enter a ticker and click 'Fetch Data & Analyze'."
   )
+
+  # Get currently selected horizon
+  selected_horizon <- reactive({
+    as.integer(input$horizon)
+  })
+
+
+  # Check if robust regression is selected
+  use_robust <- reactive({
+    input$use_robust
+  })
+
+  # Filter results for selected horizon and regression type
+  monthly_results_filtered <- reactive({
+    if (use_robust()) {
+      req(rv$monthly_results_robust)
+      rv$monthly_results_robust %>%
+        filter(horizon == selected_horizon())
+    } else {
+      req(rv$monthly_results_ols)
+      rv$monthly_results_ols %>%
+        filter(horizon == selected_horizon())
+    }
+  })
+
+  ewma_results_filtered <- reactive({
+    if (use_robust()) {
+      req(rv$ewma_results_robust)
+      rv$ewma_results_robust %>%
+        filter(horizon == selected_horizon())
+    } else {
+      req(rv$ewma_results_ols)
+      rv$ewma_results_ols %>%
+        filter(horizon == selected_horizon())
+    }
+  })
 
   # Status output
   output$status_text <- renderText({
@@ -177,30 +219,30 @@ server <- function(input, output, session) {
 
   # Dynamic titles
   output$monthly_title <- renderText({
-    horizon <- rv$current_horizon
-    robust_label <- if (rv$use_robust) " (Robust)" else ""
+    horizon <- selected_horizon()
+    robust_label <- if (use_robust()) " (Robust)" else ""
     paste0("Monthly Momentum Regression Results", robust_label)
   })
 
   output$monthly_subtitle <- renderText({
-    horizon <- rv$current_horizon
+    horizon <- selected_horizon()
     paste0("Predicting ", horizon, "-month forward returns using past momentum (1-24 months). ",
            "Standard errors: Newey-West HAC (lag = ", max(0, horizon - 1), ")")
   })
 
   output$ewma_title <- renderText({
-    robust_label <- if (rv$use_robust) " (Robust)" else ""
+    robust_label <- if (use_robust()) " (Robust)" else ""
     paste0("EWMA Momentum Regression Results", robust_label)
   })
 
   output$ewma_subtitle <- renderText({
-    horizon <- rv$current_horizon
+    horizon <- selected_horizon()
     paste0("Predicting ", horizon, "-month forward returns using EWMA of daily returns. ",
            "Standard errors: Newey-West HAC (lag = ", max(0, horizon - 1), ")")
   })
 
   output$sig_subtitle <- renderText({
-    horizon <- rv$current_horizon
+    horizon <- selected_horizon()
     paste0("All momentum measures that significantly predict ", horizon, "-month forward returns")
   })
 
@@ -215,11 +257,6 @@ server <- function(input, output, session) {
     ticker2 <- trimws(input$ticker2)
     start_date <- input$date_range[1]
     end_date <- input$date_range[2]
-    horizon <- as.integer(input$horizon)
-    use_robust <- input$use_robust
-
-    rv$current_horizon <- horizon
-    rv$use_robust <- use_robust
 
     if (nchar(ticker) == 0) {
       rv$status <- "Error: Please enter a valid ticker."
@@ -278,33 +315,47 @@ server <- function(input, output, session) {
       rv$monthly_mom <- momentum_data$monthly_mom
       rv$ewma_mom <- momentum_data$ewma_mom
 
-      robust_label <- if (use_robust) " (robust)" else ""
-      rv$status <- paste0("Momentum calculated. Running ", horizon, "-month regressions", robust_label, "...")
+      rv$status <- "Momentum calculated. Running OLS regressions for all horizons..."
 
-      # Step 4: Run regressions with selected horizon and robust option
-      rv$monthly_results <- run_monthly_momentum_regressions(
-        rv$monthly_mom,
-        horizon = horizon,
-        use_robust = use_robust
-      )
-      rv$ewma_results <- run_ewma_momentum_regressions(
-        rv$ewma_mom,
-        horizon = horizon,
-        use_robust = use_robust
-      )
+      # Step 4: Run OLS regressions for ALL horizons
+      monthly_ols_list <- lapply(ALL_HORIZONS, function(h) {
+        run_monthly_momentum_regressions(rv$monthly_mom, horizon = h, use_robust = FALSE)
+      })
+      ewma_ols_list <- lapply(ALL_HORIZONS, function(h) {
+        run_ewma_momentum_regressions(rv$ewma_mom, horizon = h, use_robust = FALSE)
+      })
 
-      # Count significant predictors
-      n_sig_monthly <- sum(rv$monthly_results$significant, na.rm = TRUE)
-      n_sig_ewma <- sum(rv$ewma_results$significant, na.rm = TRUE)
+      rv$status <- "OLS complete. Running robust regressions for all horizons..."
+
+      # Step 5: Run Robust regressions for ALL horizons
+      monthly_robust_list <- lapply(ALL_HORIZONS, function(h) {
+        run_monthly_momentum_regressions(rv$monthly_mom, horizon = h, use_robust = TRUE)
+      })
+      ewma_robust_list <- lapply(ALL_HORIZONS, function(h) {
+        run_ewma_momentum_regressions(rv$ewma_mom, horizon = h, use_robust = TRUE)
+      })
+
+      # Combine all results
+      rv$monthly_results_ols <- do.call(rbind, monthly_ols_list)
+      rv$ewma_results_ols <- do.call(rbind, ewma_ols_list)
+      rv$monthly_results_robust <- do.call(rbind, monthly_robust_list)
+      rv$ewma_results_robust <- do.call(rbind, ewma_robust_list)
+      rv$data_loaded <- TRUE
+
+      # Count significant predictors for each horizon (OLS)
+      sig_counts_ols <- sapply(ALL_HORIZONS, function(h) {
+        n_monthly <- sum(rv$monthly_results_ols$significant[rv$monthly_results_ols$horizon == h], na.rm = TRUE)
+        n_ewma <- sum(rv$ewma_results_ols$significant[rv$ewma_results_ols$horizon == h], na.rm = TRUE)
+        n_monthly + n_ewma
+      })
 
       analysis_type <- if (use_spread) "Spread analysis" else "Analysis"
-      regression_type <- if (use_robust) "Robust regression" else "OLS with Newey-West SE"
       rv$status <- paste0(
         analysis_type, " complete!\n",
         "Analyzing: ", rv$analysis_label, "\n",
-        "Horizon: ", horizon, "-month | ", regression_type, "\n",
-        "Monthly momentum: ", n_sig_monthly, "/24 significant\n",
-        "EWMA momentum: ", n_sig_ewma, "/50 significant"
+        "Both OLS and Robust regressions calculated.\n",
+        "OLS significant predictors:\n  ",
+        paste(paste0(ALL_HORIZONS, "m: ", sig_counts_ols), collapse = ", ")
       )
 
     }, error = function(e) {
@@ -314,9 +365,9 @@ server <- function(input, output, session) {
 
   # Monthly momentum table
   output$monthly_table <- renderDT({
-    req(rv$monthly_results)
+    req(monthly_results_filtered())
 
-    formatted <- format_regression_results(rv$monthly_results)
+    formatted <- format_regression_results(monthly_results_filtered())
 
     datatable(
       formatted,
@@ -339,9 +390,9 @@ server <- function(input, output, session) {
 
   # EWMA momentum table
   output$ewma_table <- renderDT({
-    req(rv$ewma_results)
+    req(ewma_results_filtered())
 
-    formatted <- format_regression_results(rv$ewma_results)
+    formatted <- format_regression_results(ewma_results_filtered())
 
     datatable(
       formatted,
@@ -364,9 +415,9 @@ server <- function(input, output, session) {
 
   # Significant predictors table
   output$significant_table <- renderDT({
-    req(rv$monthly_results, rv$ewma_results)
+    req(monthly_results_filtered(), ewma_results_filtered())
 
-    sig_summary <- get_significant_summary(rv$monthly_results, rv$ewma_results)
+    sig_summary <- get_significant_summary(monthly_results_filtered(), ewma_results_filtered())
 
     if (nrow(sig_summary) == 0) {
       return(datatable(
@@ -390,25 +441,28 @@ server <- function(input, output, session) {
 
   # Significance summary text
   output$significance_summary <- renderText({
-    req(rv$monthly_results, rv$ewma_results)
+    req(monthly_results_filtered(), ewma_results_filtered())
 
-    horizon <- rv$current_horizon
-    n_monthly_sig <- sum(rv$monthly_results$significant, na.rm = TRUE)
-    n_ewma_sig <- sum(rv$ewma_results$significant, na.rm = TRUE)
+    horizon <- selected_horizon()
+    monthly_filtered <- monthly_results_filtered()
+    ewma_filtered <- ewma_results_filtered()
+
+    n_monthly_sig <- sum(monthly_filtered$significant, na.rm = TRUE)
+    n_ewma_sig <- sum(ewma_filtered$significant, na.rm = TRUE)
 
     # Best monthly predictor
-    best_monthly <- rv$monthly_results %>%
+    best_monthly <- monthly_filtered %>%
       filter(significant == TRUE) %>%
       arrange(p_value) %>%
       slice(1)
 
     # Best EWMA predictor
-    best_ewma <- rv$ewma_results %>%
+    best_ewma <- ewma_filtered %>%
       filter(significant == TRUE) %>%
       arrange(p_value) %>%
       slice(1)
 
-    regression_type <- if (rv$use_robust) "Robust (rlm)" else "OLS"
+    regression_type <- if (use_robust()) "Robust (rlm)" else "OLS"
     nw_lag <- max(0, horizon - 1)
 
     summary_text <- paste0(
@@ -467,12 +521,12 @@ server <- function(input, output, session) {
 
   # Monthly momentum scatter plots
   output$monthly_plots <- renderPlot({
-    req(rv$monthly_results, rv$monthly_mom)
+    req(monthly_results_filtered(), rv$monthly_mom)
 
-    horizon <- rv$current_horizon
+    horizon <- selected_horizon()
 
     # Get significant predictors
-    sig_predictors <- rv$monthly_results %>%
+    sig_predictors <- monthly_results_filtered() %>%
       filter(significant == TRUE)
 
     if (nrow(sig_predictors) == 0) {
@@ -510,12 +564,12 @@ server <- function(input, output, session) {
 
   # EWMA momentum scatter plots
   output$ewma_plots <- renderPlot({
-    req(rv$ewma_results, rv$ewma_mom)
+    req(ewma_results_filtered(), rv$ewma_mom)
 
-    horizon <- rv$current_horizon
+    horizon <- selected_horizon()
 
     # Get significant predictors
-    sig_predictors <- rv$ewma_results %>%
+    sig_predictors <- ewma_results_filtered() %>%
       filter(significant == TRUE)
 
     if (nrow(sig_predictors) == 0) {
